@@ -145,9 +145,9 @@ uv run python -m tempo.training train \
   --log-every-n-steps 1
 ```
 
-By default, `--device auto` now uses all visible CUDA GPUs with distributed data parallel training.
-On your mixed 96 GB + 48 GB setup, the per-GPU batch still needs to fit on the 48 GB card, but the
-effective global batch size scales with the number of visible GPUs.
+By default, `train --device auto` now uses all visible CUDA GPUs with distributed data parallel
+training. On your mixed 96 GB + 48 GB setup, the per-GPU batch still needs to fit on the 48 GB
+card, but the effective global batch size scales with the number of visible GPUs.
 
 Run Optuna tuning:
 
@@ -160,7 +160,9 @@ uv run python -m tempo.training tune \
 
 The tuning command defaults to optimizing `val/triplet_accuracy`, which stays comparable across
 different loss families and `margin` values. Optuna storage now defaults to a persistent SQLite
-database at `<output-dir>/optuna/<study-name>.db`, so repeated runs resume automatically.
+database at `<output-dir>/optuna/<study-name>.db`, so repeated runs resume automatically. For
+stability, `tune` runs one GPU per trial by default even if multiple GPUs are visible; you can use
+multiple workers against the same study storage to keep several GPUs busy.
 Use `--tune-monitor val/loss --tune-monitor-mode min` if you want Optuna to rank trials by raw
 validation loss instead.
 

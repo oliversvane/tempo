@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from lightning.pytorch.callbacks import Callback, EarlyStopping, LearningRateMonitor, ModelCheckpoint, TQDMProgressBar
 from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.plugins.environments import LightningEnvironment
 
 from tempo.datasets.utils import PROJECT_ROOT
 
@@ -32,6 +33,10 @@ from .triplet import sequence_metric_loss
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
+
+# Set a Tensor Core-friendly default at import time so child processes launched by
+# multiprocessing inherit it too. The per-run config can still override this later.
+torch.set_float32_matmul_precision("high")
 
 
 @dataclass(frozen=True)
@@ -169,6 +174,31 @@ def _device_count(devices: int | list[int]) -> int:
     return devices if isinstance(devices, int) else len(devices)
 
 
+def _requested_device_count(device_name: str) -> int:
+    normalized = device_name.strip().lower()
+    if normalized in {"cpu", "mps"}:
+        return 1
+    if normalized == "auto" and not torch.cuda.is_available():
+        return 1
+    if _is_cuda_device_name(normalized):
+        return _device_count(_parse_cuda_device_spec(normalized))
+    raise ValueError(f"Unsupported device specifier: {device_name}")
+
+
+def _resolve_optuna_trial_device(device_name: str) -> str:
+    normalized = device_name.strip().lower()
+    if normalized in {"cpu", "mps"}:
+        return normalized
+    if normalized == "auto" and not torch.cuda.is_available():
+        return "cpu"
+    if not _is_cuda_device_name(normalized):
+        raise ValueError(f"Unsupported device specifier: {device_name}")
+    requested = _parse_cuda_device_spec(normalized)
+    if _device_count(requested) <= 1:
+        return device_name
+    return "cuda:0"
+
+
 def _resolve_lightning_runtime(
     device_name: str,
     *,
@@ -178,9 +208,7 @@ def _resolve_lightning_runtime(
     if normalized == "auto":
         if torch.cuda.is_available():
             devices = _parse_cuda_device_spec("auto")
-            strategy = "ddp_spawn" if _device_count(devices) > 1 and for_optuna else (
-                "ddp_find_unused_parameters_false" if _device_count(devices) > 1 else "auto"
-            )
+            strategy = "ddp_find_unused_parameters_false" if _device_count(devices) > 1 else "auto"
             return "gpu", devices, strategy
         if torch.backends.mps.is_available():
             return "mps", 1, "auto"
@@ -192,9 +220,7 @@ def _resolve_lightning_runtime(
         return "mps", 1, "auto"
     if normalized in {"gpu", "cuda", "all", "gpu:all", "cuda:all"} or normalized.startswith("cuda:"):
         devices = _parse_cuda_device_spec(normalized)
-        strategy = "ddp_spawn" if _device_count(devices) > 1 and for_optuna else (
-            "ddp_find_unused_parameters_false" if _device_count(devices) > 1 else "auto"
-        )
+        strategy = "ddp_find_unused_parameters_false" if _device_count(devices) > 1 else "auto"
         return "gpu", devices, strategy
     raise ValueError(f"Unsupported device specifier: {device_name}")
 
@@ -1066,6 +1092,7 @@ def train_triplet_model(
         accelerator=accelerator,
         devices=devices,
         strategy=strategy,
+        plugins=[LightningEnvironment()],
         callbacks=callbacks,
         default_root_dir=str(output_dir),
         enable_progress_bar=True,
@@ -1208,6 +1235,8 @@ def run_optuna_study(
     study_dir = Path(base_config.output_dir) / "optuna"
     study_dir.mkdir(parents=True, exist_ok=True)
     storage = _normalize_optuna_storage(storage, study_dir, study_name)
+    trial_device = _resolve_optuna_trial_device(base_config.device)
+    using_single_gpu_trials = trial_device != base_config.device or _requested_device_count(base_config.device) > 1
     sampler = optuna.samplers.TPESampler(seed=base_config.seed)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=2)
     study = optuna.create_study(
@@ -1219,8 +1248,16 @@ def run_optuna_study(
         load_if_exists=True,
     )
 
+    if using_single_gpu_trials:
+        print(
+            "Optuna will run one GPU per trial for stability; "
+            f"trial device = {trial_device}. "
+            "Use multiple workers with the same SQLite storage to occupy multiple GPUs."
+        )
+
     def objective(trial: optuna.Trial) -> float:
         config = suggest_training_config(trial, base_config)
+        config = replace(config, device=trial_device)
         result = train_triplet_model(config, trial=trial, monitor=monitor, monitor_mode=monitor_mode)
         trial.set_user_attr("best_epoch", result.best_epoch)
         trial.set_user_attr("best_checkpoint_path", str(result.best_checkpoint_path))
@@ -1228,6 +1265,7 @@ def run_optuna_study(
         trial.set_user_attr("best_metric_mode", result.best_metric_mode)
         trial.set_user_attr("best_metric_value", result.best_metric_value)
         trial.set_user_attr("best_val_loss", result.best_val_loss)
+        trial.set_user_attr("device", trial_device)
         return result.best_metric_value
 
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
@@ -1238,6 +1276,7 @@ def run_optuna_study(
             "monitor": monitor,
             "monitor_mode": monitor_mode,
             "storage": storage,
+            "trial_device": trial_device,
             "best_value": study.best_value,
             "best_trial_number": study.best_trial.number,
             "best_params": study.best_params,

@@ -8,3 +8,7 @@ data/processed/
 data/_kaggle_probe/
 hf_home/
 runs/
+slurm-*.out
+slurm-*.err
+logs/*.out
+logs/*.err
