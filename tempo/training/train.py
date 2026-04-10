@@ -77,6 +77,7 @@ class TrainingConfig:
     early_stopping_min_delta: float = 0.0
     seed: int = 7
     device: str = "auto"
+    matmul_precision: str = "high"
     log_every_n_steps: int = 1
     progress_bar_refresh_rate: int = 1
     log_embeddings_every_n_epochs: int = 1
@@ -113,23 +114,98 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(_json_ready(payload), indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _resolve_lightning_device(device_name: str) -> tuple[str, int | list[int]]:
-    if device_name == "auto":
-        if torch.cuda.is_available():
-            return "gpu", 1
-        if torch.backends.mps.is_available():
-            return "mps", 1
-        return "cpu", 1
+def _normalize_matmul_precision(matmul_precision: str) -> str:
+    normalized = matmul_precision.strip().lower()
+    if normalized not in {"highest", "high", "medium"}:
+        raise ValueError(f"Unsupported matmul precision: {matmul_precision}")
+    return normalized
 
-    if device_name == "cpu":
-        return "cpu", 1
-    if device_name == "mps":
-        return "mps", 1
-    if device_name in {"gpu", "cuda"}:
-        return "gpu", 1
-    if device_name.startswith("cuda:"):
-        return "gpu", [int(device_name.split(":", maxsplit=1)[1])]
+
+def _configure_matmul_precision(matmul_precision: str) -> None:
+    normalized = _normalize_matmul_precision(matmul_precision)
+    torch.set_float32_matmul_precision(normalized)
+    if torch.cuda.is_available():
+        allow_tf32 = normalized in {"high", "medium"}
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+        torch.backends.cudnn.allow_tf32 = allow_tf32
+
+
+def _is_cuda_device_name(device_name: str) -> bool:
+    normalized = device_name.strip().lower()
+    return normalized == "auto" or normalized in {"gpu", "cuda", "all", "gpu:all", "cuda:all"} or normalized.startswith("cuda:")
+
+
+def _parse_cuda_device_spec(device_name: str) -> int | list[int]:
+    device_count = torch.cuda.device_count()
+    if device_count <= 0:
+        raise ValueError("CUDA was requested but no GPUs are available.")
+
+    def validate_indices(indices: list[int]) -> list[int]:
+        if not indices:
+            raise ValueError(f"Unsupported CUDA device specifier: {device_name}")
+        for index in indices:
+            if not 0 <= index < device_count:
+                raise ValueError(
+                    f"CUDA device index {index} is out of range for {device_count} visible GPU(s)."
+                )
+        return indices
+
+    normalized = device_name.strip().lower()
+    if normalized in {"auto", "gpu", "cuda", "all", "gpu:all", "cuda:all"}:
+        return device_count
+
+    if not normalized.startswith("cuda:"):
+        raise ValueError(f"Unsupported CUDA device specifier: {device_name}")
+
+    requested = normalized.split(":", maxsplit=1)[1].strip()
+    if requested == "all":
+        return device_count
+    if "," in requested:
+        return validate_indices([int(part.strip()) for part in requested.split(",") if part.strip()])
+    return validate_indices([int(requested)])
+
+
+def _device_count(devices: int | list[int]) -> int:
+    return devices if isinstance(devices, int) else len(devices)
+
+
+def _resolve_lightning_runtime(
+    device_name: str,
+    *,
+    for_optuna: bool = False,
+) -> tuple[str, int | list[int], str]:
+    normalized = device_name.strip().lower()
+    if normalized == "auto":
+        if torch.cuda.is_available():
+            devices = _parse_cuda_device_spec("auto")
+            strategy = "ddp_spawn" if _device_count(devices) > 1 and for_optuna else (
+                "ddp_find_unused_parameters_false" if _device_count(devices) > 1 else "auto"
+            )
+            return "gpu", devices, strategy
+        if torch.backends.mps.is_available():
+            return "mps", 1, "auto"
+        return "cpu", 1, "auto"
+
+    if normalized == "cpu":
+        return "cpu", 1, "auto"
+    if normalized == "mps":
+        return "mps", 1, "auto"
+    if normalized in {"gpu", "cuda", "all", "gpu:all", "cuda:all"} or normalized.startswith("cuda:"):
+        devices = _parse_cuda_device_spec(normalized)
+        strategy = "ddp_spawn" if _device_count(devices) > 1 and for_optuna else (
+            "ddp_find_unused_parameters_false" if _device_count(devices) > 1 else "auto"
+        )
+        return "gpu", devices, strategy
     raise ValueError(f"Unsupported device specifier: {device_name}")
+
+
+def _normalize_optuna_storage(storage: str | None, study_dir: Path, study_name: str) -> str:
+    if storage is None:
+        default_path = (study_dir / f"{study_name}.db").resolve()
+        return f"sqlite:///{default_path}"
+    if "://" in storage:
+        return storage
+    return f"sqlite:///{Path(storage).expanduser().resolve()}"
 
 
 def _extract_scalar_metrics(metrics: dict[str, Any]) -> dict[str, float]:
@@ -171,7 +247,7 @@ def _resolve_pin_memory(pin_memory: bool | None, device_name: str) -> bool:
         return pin_memory
     if not torch.cuda.is_available():
         return False
-    return device_name in {"auto", "gpu", "cuda"} or device_name.startswith("cuda:")
+    return _is_cuda_device_name(device_name)
 
 
 def _flatten_hparams(value: Any, *, prefix: str = "") -> dict[str, bool | int | float | str]:
@@ -206,6 +282,8 @@ def _config_hparams(config: TrainingConfig, datamodule: "EmotionTripletDataModul
             "early_stopping_patience": config.early_stopping_patience,
             "early_stopping_min_delta": config.early_stopping_min_delta,
             "max_epochs": config.max_epochs,
+            "device": config.device,
+            "matmul_precision": config.matmul_precision,
         },
         "data": {
             "chunk_seconds": config.data.chunk_seconds,
@@ -504,6 +582,8 @@ class EmotionTripletDataModule(pl.LightningDataModule):
     def train_dataloader(self):
         if self.train_dataset is None:
             raise RuntimeError("DataModule.setup() must run before requesting train_dataloader().")
+        world_size = max(1, getattr(self.trainer, "world_size", 1))
+        global_rank = getattr(self.trainer, "global_rank", 0)
         return build_triplet_dataloader_from_dataset(
             self.train_dataset,
             labels_per_batch=self.config.data.labels_per_batch,
@@ -513,11 +593,15 @@ class EmotionTripletDataModule(pl.LightningDataModule):
             num_workers=self.train_num_workers,
             pin_memory=self.pin_memory,
             prefetch_factor=self.prefetch_factor,
+            num_replicas=world_size,
+            rank=global_rank,
         )
 
     def val_dataloader(self):
         if self.val_dataset is None:
             raise RuntimeError("DataModule.setup() must run before requesting val_dataloader().")
+        world_size = max(1, getattr(self.trainer, "world_size", 1))
+        global_rank = getattr(self.trainer, "global_rank", 0)
         return build_triplet_dataloader_from_dataset(
             self.val_dataset,
             labels_per_batch=self.config.data.labels_per_batch,
@@ -527,6 +611,8 @@ class EmotionTripletDataModule(pl.LightningDataModule):
             num_workers=self.val_num_workers,
             pin_memory=self.pin_memory,
             prefetch_factor=self.prefetch_factor,
+            num_replicas=world_size,
+            rank=global_rank,
         )
 
     def summary(self) -> dict[str, Any]:
@@ -596,9 +682,18 @@ class TripletLightningModule(pl.LightningModule):
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:
         loss, _, stats = self._shared_step(batch)
         batch_size = int(batch.labels.size(0))
+        sync_dist = self._should_sync_dist()
 
         self.log("train/loss_step", loss, on_step=True, on_epoch=False, prog_bar=True, batch_size=batch_size)
-        self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log(
+            "train/loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+            sync_dist=sync_dist,
+        )
         self.log(
             "train/triplet_accuracy",
             stats["triplet_accuracy"],
@@ -606,6 +701,7 @@ class TripletLightningModule(pl.LightningModule):
             on_epoch=True,
             prog_bar=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         self.log(
             "train/mean_hardest_positive",
@@ -613,6 +709,7 @@ class TripletLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         self.log(
             "train/mean_hardest_negative",
@@ -620,6 +717,7 @@ class TripletLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         self.log(
             "train/valid_anchors",
@@ -627,6 +725,7 @@ class TripletLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         self.log(
             "train/separation_gap",
@@ -634,14 +733,24 @@ class TripletLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         return loss
 
     def validation_step(self, batch, batch_idx: int) -> torch.Tensor:
         loss, pooled_embeddings, stats = self._shared_step(batch)
         batch_size = int(batch.labels.size(0))
+        sync_dist = self._should_sync_dist()
 
-        self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log(
+            "val/loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+            sync_dist=sync_dist,
+        )
         self.log(
             "val/triplet_accuracy",
             stats["triplet_accuracy"],
@@ -649,6 +758,7 @@ class TripletLightningModule(pl.LightningModule):
             on_epoch=True,
             prog_bar=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         self.log(
             "val/mean_hardest_positive",
@@ -656,6 +766,7 @@ class TripletLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         self.log(
             "val/mean_hardest_negative",
@@ -663,6 +774,7 @@ class TripletLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         self.log(
             "val/valid_anchors",
@@ -670,6 +782,7 @@ class TripletLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
         self.log(
             "val/separation_gap",
@@ -677,6 +790,7 @@ class TripletLightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
+            sync_dist=sync_dist,
         )
 
         if self._should_log_embeddings():
@@ -722,6 +836,9 @@ class TripletLightningModule(pl.LightningModule):
         frequency = max(1, self.config.log_embeddings_every_n_epochs)
         return (self.current_epoch + 1) % frequency == 0
 
+    def _should_sync_dist(self) -> bool:
+        return getattr(self.trainer, "world_size", 1) > 1
+
     @staticmethod
     def _set_sampler_epoch(dataloaders: Any, epoch: int) -> None:
         if dataloaders is None:
@@ -756,7 +873,8 @@ class MetricsHistoryCallback(Callback):
             "metrics": {key: value for key, value in metrics.items() if key.startswith(("train/", "val/"))},
         }
         self.history.append(epoch_record)
-        _write_json(self.history_path, self.history)
+        if trainer.is_global_zero:
+            _write_json(self.history_path, self.history)
 
         val_loss = epoch_record["metrics"].get("val/loss")
         if val_loss is not None and val_loss < self.best_val_loss:
@@ -775,7 +893,7 @@ class MetricsHistoryCallback(Callback):
 
 class TensorBoardEmbeddingCallback(Callback):
     def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: TripletLightningModule) -> None:
-        if trainer.sanity_checking:
+        if trainer.sanity_checking or not trainer.is_global_zero:
             return
 
         payload = pl_module.get_val_embedding_payload()
@@ -841,6 +959,8 @@ class TensorBoardHParamsCallback(Callback):
         self.history_callback = history_callback
 
     def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if not trainer.is_global_zero:
+            return
         tensorboard_logger = _find_tensorboard_logger(trainer)
         if tensorboard_logger is None:
             return
@@ -894,6 +1014,7 @@ def train_triplet_model(
     if config.model.sample_rate != config.data.sample_rate:
         raise ValueError("Model and data sample rates must match.")
     monitor_mode = _validate_monitor_mode(monitor_mode)
+    _configure_matmul_precision(config.matmul_precision)
 
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -936,13 +1057,15 @@ def train_triplet_model(
         TensorBoardEmbeddingCallback(),
         TensorBoardHParamsCallback(config, datamodule, history_callback),
     ]
-    if trial is not None:
+    accelerator, devices, strategy = _resolve_lightning_runtime(config.device, for_optuna=trial is not None)
+    distributed = accelerator == "gpu" and _device_count(devices) > 1
+    if trial is not None and not distributed:
         callbacks.append(OptunaPruningCallback(trial, monitor=monitor))
 
-    accelerator, devices = _resolve_lightning_device(config.device)
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=devices,
+        strategy=strategy,
         callbacks=callbacks,
         default_root_dir=str(output_dir),
         enable_progress_bar=True,
@@ -1084,6 +1207,7 @@ def run_optuna_study(
     monitor_mode = _validate_monitor_mode(monitor_mode)
     study_dir = Path(base_config.output_dir) / "optuna"
     study_dir.mkdir(parents=True, exist_ok=True)
+    storage = _normalize_optuna_storage(storage, study_dir, study_name)
     sampler = optuna.samplers.TPESampler(seed=base_config.seed)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=2)
     study = optuna.create_study(
@@ -1113,6 +1237,7 @@ def run_optuna_study(
         {
             "monitor": monitor,
             "monitor_mode": monitor_mode,
+            "storage": storage,
             "best_value": study.best_value,
             "best_trial_number": study.best_trial.number,
             "best_params": study.best_params,

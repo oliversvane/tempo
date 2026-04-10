@@ -39,6 +39,7 @@ def _common_config_from_args(args: argparse.Namespace) -> TrainingConfig:
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
         device=args.device,
+        matmul_precision=args.matmul_precision,
         log_every_n_steps=args.log_every_n_steps,
         progress_bar_refresh_rate=args.progress_bar_refresh_rate,
         embedding_log_limit=args.embedding_log_limit,
@@ -62,6 +63,7 @@ def main() -> int:
         command_parser.add_argument("--model-type", choices=["conformer", "rnnt"], default="conformer")
         command_parser.add_argument("--activation", choices=["relu", "gelu", "silu", "mish"], default="silu")
         command_parser.add_argument("--device", default="auto")
+        command_parser.add_argument("--matmul-precision", choices=["highest", "high", "medium"], default="high")
         command_parser.add_argument("--chunk-seconds", default=3.2, type=float)
         command_parser.add_argument("--labels-per-batch", default=4, type=int)
         command_parser.add_argument("--samples-per-label", default=4, type=int)

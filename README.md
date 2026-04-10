@@ -145,6 +145,10 @@ uv run python -m tempo.training train \
   --log-every-n-steps 1
 ```
 
+By default, `--device auto` now uses all visible CUDA GPUs with distributed data parallel training.
+On your mixed 96 GB + 48 GB setup, the per-GPU batch still needs to fit on the 48 GB card, but the
+effective global batch size scales with the number of visible GPUs.
+
 Run Optuna tuning:
 
 ```bash
@@ -155,8 +159,10 @@ uv run python -m tempo.training tune \
 ```
 
 The tuning command defaults to optimizing `val/triplet_accuracy`, which stays comparable across
-different loss families and `margin` values. Use `--tune-monitor val/loss --tune-monitor-mode min`
-if you want Optuna to rank trials by raw validation loss instead.
+different loss families and `margin` values. Optuna storage now defaults to a persistent SQLite
+database at `<output-dir>/optuna/<study-name>.db`, so repeated runs resume automatically.
+Use `--tune-monitor val/loss --tune-monitor-mode min` if you want Optuna to rank trials by raw
+validation loss instead.
 
 Monitor training with TensorBoard:
 
@@ -169,7 +175,9 @@ Useful training knobs:
 - `--train-num-workers -1` and `--val-num-workers -1` enable auto worker selection
 - `--prefetch-factor 4` keeps more batches queued in RAM
 - `--pin-memory` enables CUDA-friendly host-to-device transfers
+- `--matmul-precision high` enables Tensor Core-friendly float32 matmul behavior and suppresses the Lightning warning
 - `--early-stopping-patience` and `--early-stopping-min-delta` control stopping behavior
+- `--device cuda:0,1,2` restricts training to a chosen GPU subset, while `--device cpu` forces CPU-only execution
 
 ## Notes
 

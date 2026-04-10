@@ -305,6 +305,8 @@ class EmotionBalancedBatchSampler(Sampler[list[int]]):
         samples_per_label: int = 4,
         batches_per_epoch: int | None = None,
         seed: int = 0,
+        num_replicas: int = 1,
+        rank: int = 0,
     ) -> None:
         self.label_to_indices = {
             label: list(indices) for label, indices in label_to_indices.items() if indices
@@ -317,9 +319,13 @@ class EmotionBalancedBatchSampler(Sampler[list[int]]):
         self.batches_per_epoch = batches_per_epoch or max(1, math.ceil(total_examples / self.batch_size))
         self.seed = seed
         self.epoch = 0
+        self.num_replicas = max(1, num_replicas)
+        self.rank = rank
 
         if len(self.labels) < 2:
             raise ValueError("Triplet mining requires at least two emotion classes.")
+        if not 0 <= self.rank < self.num_replicas:
+            raise ValueError("rank must be in the range [0, num_replicas).")
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
@@ -329,7 +335,8 @@ class EmotionBalancedBatchSampler(Sampler[list[int]]):
 
     def __iter__(self):
         rng = random.Random(self.seed + self.epoch)
-        for _ in range(self.batches_per_epoch):
+        total_batches = self.batches_per_epoch * self.num_replicas
+        for batch_index in range(total_batches):
             chosen_labels = self._sample_labels(rng)
             batch: list[int] = []
             for label in chosen_labels:
@@ -338,7 +345,8 @@ class EmotionBalancedBatchSampler(Sampler[list[int]]):
                     batch.extend(rng.sample(indices, k=self.samples_per_label))
                 else:
                     batch.extend(rng.choices(indices, k=self.samples_per_label))
-            yield batch
+            if batch_index % self.num_replicas == self.rank:
+                yield batch
 
     def _sample_labels(self, rng: random.Random) -> list[int]:
         if len(self.labels) >= self.labels_per_batch:
@@ -559,6 +567,8 @@ def build_triplet_dataloader_from_dataset(
     num_workers: int = 0,
     pin_memory: bool = False,
     prefetch_factor: int = 4,
+    num_replicas: int = 1,
+    rank: int = 0,
 ) -> DataLoader[EmotionStreamingBatch]:
     sampler = EmotionBalancedBatchSampler(
         dataset.label_to_indices,
@@ -566,6 +576,8 @@ def build_triplet_dataloader_from_dataset(
         samples_per_label=samples_per_label,
         batches_per_epoch=batches_per_epoch,
         seed=seed,
+        num_replicas=num_replicas,
+        rank=rank,
     )
     dataloader_kwargs: dict[str, Any] = {
         "dataset": dataset,
