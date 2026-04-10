@@ -259,6 +259,31 @@ def _is_better_metric(candidate: float, best: float, *, mode: str) -> bool:
     return candidate > best
 
 
+def _clear_distributed_environment_for_local_run() -> None:
+    # When a shell lives inside an allocated SLURM job but the Python process was not launched
+    # with `srun`, Lightning can still pick up rank/world-size variables and try to behave like
+    # an externally launched distributed job. For single-device runs, clear the rank-related
+    # variables before Trainer initialization so the run stays local and single-process.
+    keys = (
+        "SLURM_NTASKS",
+        "SLURM_NTASKS_PER_NODE",
+        "SLURM_PROCID",
+        "SLURM_LOCALID",
+        "SLURM_NODEID",
+        "SLURM_STEP_ID",
+        "SLURM_STEP_NUM_TASKS",
+        "LOCAL_RANK",
+        "RANK",
+        "GROUP_RANK",
+        "NODE_RANK",
+        "WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+    )
+    for key in keys:
+        os.environ.pop(key, None)
+
+
 def _resolve_num_workers(requested_workers: int, *, default_cap: int) -> int:
     if requested_workers >= 0:
         return requested_workers
@@ -1085,8 +1110,21 @@ def train_triplet_model(
     ]
     accelerator, devices, strategy = _resolve_lightning_runtime(config.device, for_optuna=trial is not None)
     distributed = accelerator == "gpu" and _device_count(devices) > 1
+    if not distributed:
+        _clear_distributed_environment_for_local_run()
     if trial is not None and not distributed:
         callbacks.append(OptunaPruningCallback(trial, monitor=monitor))
+
+    print(
+        "Trainer runtime:",
+        {
+            "device": config.device,
+            "accelerator": accelerator,
+            "devices": devices,
+            "strategy": strategy,
+            "distributed": distributed,
+        },
+    )
 
     trainer = pl.Trainer(
         accelerator=accelerator,
