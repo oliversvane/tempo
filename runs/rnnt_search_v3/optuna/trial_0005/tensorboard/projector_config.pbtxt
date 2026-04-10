@@ -1,0 +1,60 @@
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0000:00000"
+  metadata_path: "00000/val_embedding_projector_epoch_0000/metadata.tsv"
+  tensor_path: "00000/val_embedding_projector_epoch_0000/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0001:00001"
+  metadata_path: "00001/val_embedding_projector_epoch_0001/metadata.tsv"
+  tensor_path: "00001/val_embedding_projector_epoch_0001/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0002:00002"
+  metadata_path: "00002/val_embedding_projector_epoch_0002/metadata.tsv"
+  tensor_path: "00002/val_embedding_projector_epoch_0002/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0003:00003"
+  metadata_path: "00003/val_embedding_projector_epoch_0003/metadata.tsv"
+  tensor_path: "00003/val_embedding_projector_epoch_0003/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0004:00004"
+  metadata_path: "00004/val_embedding_projector_epoch_0004/metadata.tsv"
+  tensor_path: "00004/val_embedding_projector_epoch_0004/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0005:00005"
+  metadata_path: "00005/val_embedding_projector_epoch_0005/metadata.tsv"
+  tensor_path: "00005/val_embedding_projector_epoch_0005/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0006:00006"
+  metadata_path: "00006/val_embedding_projector_epoch_0006/metadata.tsv"
+  tensor_path: "00006/val_embedding_projector_epoch_0006/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0007:00007"
+  metadata_path: "00007/val_embedding_projector_epoch_0007/metadata.tsv"
+  tensor_path: "00007/val_embedding_projector_epoch_0007/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0008:00008"
+  metadata_path: "00008/val_embedding_projector_epoch_0008/metadata.tsv"
+  tensor_path: "00008/val_embedding_projector_epoch_0008/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0009:00009"
+  metadata_path: "00009/val_embedding_projector_epoch_0009/metadata.tsv"
+  tensor_path: "00009/val_embedding_projector_epoch_0009/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0010:00010"
+  metadata_path: "00010/val_embedding_projector_epoch_0010/metadata.tsv"
+  tensor_path: "00010/val_embedding_projector_epoch_0010/tensors.tsv"
+}
+embeddings {
+  tensor_name: "val_embedding_projector_epoch_0011:00011"
+  metadata_path: "00011/val_embedding_projector_epoch_0011/metadata.tsv"
+  tensor_path: "00011/val_embedding_projector_epoch_0011/tensors.tsv"
+}

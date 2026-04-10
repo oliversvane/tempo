@@ -1,0 +1,27 @@
+{
+  "best_params": {
+    "activation": "mish",
+    "chunk_seconds": 2.4,
+    "dropout": 0.11626281060168818,
+    "encoder_dim": 192,
+    "labels_per_batch": 3,
+    "learning_rate": 0.0008136151980161061,
+    "loss_name": "batch_all_triplet",
+    "margin": 0.10123633887000288,
+    "n_mels": 64,
+    "noise_probability": 0.41652479568731215,
+    "output_dim": 128,
+    "rnnt_layers": 4,
+    "rnnt_time_reduction_factor": 2,
+    "samples_per_label": 4,
+    "snr_db_max": 29.82659555182947,
+    "snr_db_min": 8.191766474858694,
+    "weight_decay": 1.007899015222529e-06
+  },
+  "best_trial_number": 13,
+  "best_user_attrs": {
+    "best_checkpoint_path": "/home/svane/projects/tempo/runs/rnnt_search_v3/optuna/trial_0013/checkpoints/best.ckpt",
+    "best_epoch": 6
+  },
+  "best_value": 0.06229933723807335
+}

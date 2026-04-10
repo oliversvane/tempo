@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tempo"
+version = "0.1.0"
+description = "Audio emotion dataset ingestion utilities"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=4.8.4",
+    "huggingface-hub>=1.0.0",
+    "kagglehub>=1.0.0",
+    "lightning>=2.5.1",
+    "matplotlib>=3.10.1",
+    "optuna>=4.3.0",
+    "soundfile>=0.13.1",
+    "tensorboard>=2.20.0",
+    "torch>=2.8.0",
+]
+
+[project.scripts]
+tempo-datasets = "tempo.datasets.cli:main"
+tempo-train = "tempo.training.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tempo"]
