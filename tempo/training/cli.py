@@ -98,6 +98,12 @@ def main() -> int:
     tune_parser.add_argument("--timeout", default=None, type=float)
     tune_parser.add_argument("--study-name", default="emotion_embeddings")
     tune_parser.add_argument("--storage", default=None)
+    tune_parser.add_argument(
+        "--tune-monitor",
+        choices=["val/loss", "val/triplet_accuracy", "val/separation_gap"],
+        default="val/triplet_accuracy",
+    )
+    tune_parser.add_argument("--tune-monitor-mode", choices=["min", "max"], default="max")
 
     args = parser.parse_args()
     config = _common_config_from_args(args)
@@ -105,6 +111,10 @@ def main() -> int:
     if args.command == "train":
         result = train_triplet_model(config)
         print(f"Best val loss: {result.best_val_loss:.6f}")
+        print(
+            f"Selected metric: {result.best_metric_name} "
+            f"({result.best_metric_mode}) = {result.best_metric_value:.6f}"
+        )
         print(f"Best epoch: {result.best_epoch}")
         print(f"Checkpoint: {result.best_checkpoint_path}")
         print(f"TensorBoard logs: {result.tensorboard_dir}")
@@ -116,8 +126,10 @@ def main() -> int:
         study_name=args.study_name,
         storage=args.storage,
         timeout=args.timeout,
+        monitor=args.tune_monitor,
+        monitor_mode=args.tune_monitor_mode,
     )
     print(f"Best trial: {study.best_trial.number}")
-    print(f"Best value: {study.best_value:.6f}")
+    print(f"Best {args.tune_monitor}: {study.best_value:.6f}")
     print(f"Best params: {study.best_params}")
     return 0

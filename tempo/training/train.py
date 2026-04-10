@@ -89,6 +89,9 @@ class TrainingConfig:
 class TrainingResult:
     best_val_loss: float
     best_epoch: int
+    best_metric_name: str
+    best_metric_mode: str
+    best_metric_value: float
     output_dir: Path
     best_checkpoint_path: Path
     tensorboard_dir: Path
@@ -139,6 +142,19 @@ def _extract_scalar_metrics(metrics: dict[str, Any]) -> dict[str, float]:
         elif isinstance(value, (float, int)):
             extracted[key] = float(value)
     return extracted
+
+
+def _validate_monitor_mode(mode: str) -> str:
+    normalized = mode.strip().lower()
+    if normalized not in {"min", "max"}:
+        raise ValueError(f"Unsupported monitor mode: {mode}")
+    return normalized
+
+
+def _is_better_metric(candidate: float, best: float, *, mode: str) -> bool:
+    if mode == "min":
+        return candidate < best
+    return candidate > best
 
 
 def _resolve_num_workers(requested_workers: int, *, default_cap: int) -> int:
@@ -719,12 +735,15 @@ class TripletLightningModule(pl.LightningModule):
 
 
 class MetricsHistoryCallback(Callback):
-    def __init__(self, history_path: Path) -> None:
+    def __init__(self, history_path: Path, *, monitor: str = "val/loss", mode: str = "min") -> None:
         super().__init__()
         self.history_path = history_path
+        self.monitor = monitor
+        self.mode = _validate_monitor_mode(mode)
         self.history: list[dict[str, Any]] = []
         self.best_epoch = -1
         self.best_val_loss = float("inf")
+        self.best_metric_value = float("inf") if self.mode == "min" else float("-inf")
         self.best_metrics: dict[str, float] = {}
 
     def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
@@ -742,6 +761,14 @@ class MetricsHistoryCallback(Callback):
         val_loss = epoch_record["metrics"].get("val/loss")
         if val_loss is not None and val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
+
+        monitor_value = epoch_record["metrics"].get(self.monitor)
+        if monitor_value is not None and _is_better_metric(
+            monitor_value,
+            self.best_metric_value,
+            mode=self.mode,
+        ):
+            self.best_metric_value = monitor_value
             self.best_epoch = trainer.current_epoch
             self.best_metrics = dict(epoch_record["metrics"])
 
@@ -861,9 +888,12 @@ def train_triplet_model(
     config: TrainingConfig,
     *,
     trial: optuna.Trial | None = None,
+    monitor: str = "val/loss",
+    monitor_mode: str = "min",
 ) -> TrainingResult:
     if config.model.sample_rate != config.data.sample_rate:
         raise ValueError("Model and data sample rates must match.")
+    monitor_mode = _validate_monitor_mode(monitor_mode)
 
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -886,17 +916,17 @@ def train_triplet_model(
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir / "checkpoints",
         filename="best",
-        monitor="val/loss",
-        mode="min",
+        monitor=monitor,
+        mode=monitor_mode,
         save_top_k=1,
         save_last=True,
     )
-    history_callback = MetricsHistoryCallback(history_path)
+    history_callback = MetricsHistoryCallback(history_path, monitor=monitor, mode=monitor_mode)
     callbacks: list[Callback] = [
         checkpoint_callback,
         EarlyStopping(
-            monitor="val/loss",
-            mode="min",
+            monitor=monitor,
+            mode=monitor_mode,
             patience=config.early_stopping_patience,
             min_delta=config.early_stopping_min_delta,
         ),
@@ -907,7 +937,7 @@ def train_triplet_model(
         TensorBoardHParamsCallback(config, datamodule, history_callback),
     ]
     if trial is not None:
-        callbacks.append(OptunaPruningCallback(trial))
+        callbacks.append(OptunaPruningCallback(trial, monitor=monitor))
 
     accelerator, devices = _resolve_lightning_device(config.device)
     trainer = pl.Trainer(
@@ -928,17 +958,20 @@ def train_triplet_model(
 
     best_checkpoint_path = Path(checkpoint_callback.best_model_path) if checkpoint_callback.best_model_path else output_dir / "checkpoints" / "best.ckpt"
     best_model_score = checkpoint_callback.best_model_score
-    best_val_loss = (
+    best_metric_value = (
         float(best_model_score.detach().cpu().item())
         if isinstance(best_model_score, torch.Tensor)
         else float(best_model_score)
         if best_model_score is not None
-        else history_callback.best_val_loss
+        else history_callback.best_metric_value
     )
 
     return TrainingResult(
-        best_val_loss=best_val_loss,
+        best_val_loss=history_callback.best_val_loss,
         best_epoch=history_callback.best_epoch,
+        best_metric_name=monitor,
+        best_metric_mode=monitor_mode,
+        best_metric_value=best_metric_value,
         output_dir=output_dir,
         best_checkpoint_path=best_checkpoint_path,
         tensorboard_dir=Path(logger.log_dir),
@@ -1045,7 +1078,10 @@ def run_optuna_study(
     study_name: str = "emotion_embeddings",
     storage: str | None = None,
     timeout: float | None = None,
+    monitor: str = "val/triplet_accuracy",
+    monitor_mode: str = "max",
 ) -> optuna.Study:
+    monitor_mode = _validate_monitor_mode(monitor_mode)
     study_dir = Path(base_config.output_dir) / "optuna"
     study_dir.mkdir(parents=True, exist_ok=True)
     sampler = optuna.samplers.TPESampler(seed=base_config.seed)
@@ -1055,22 +1091,28 @@ def run_optuna_study(
         storage=storage,
         sampler=sampler,
         pruner=pruner,
-        direction="minimize",
+        direction="minimize" if monitor_mode == "min" else "maximize",
         load_if_exists=True,
     )
 
     def objective(trial: optuna.Trial) -> float:
         config = suggest_training_config(trial, base_config)
-        result = train_triplet_model(config, trial=trial)
+        result = train_triplet_model(config, trial=trial, monitor=monitor, monitor_mode=monitor_mode)
         trial.set_user_attr("best_epoch", result.best_epoch)
         trial.set_user_attr("best_checkpoint_path", str(result.best_checkpoint_path))
-        return result.best_val_loss
+        trial.set_user_attr("best_metric_name", result.best_metric_name)
+        trial.set_user_attr("best_metric_mode", result.best_metric_mode)
+        trial.set_user_attr("best_metric_value", result.best_metric_value)
+        trial.set_user_attr("best_val_loss", result.best_val_loss)
+        return result.best_metric_value
 
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
 
     _write_json(
         study_dir / "best_trial.json",
         {
+            "monitor": monitor,
+            "monitor_mode": monitor_mode,
             "best_value": study.best_value,
             "best_trial_number": study.best_trial.number,
             "best_params": study.best_params,

@@ -154,6 +154,10 @@ uv run python -m tempo.training tune \
   --trials 20
 ```
 
+The tuning command defaults to optimizing `val/triplet_accuracy`, which stays comparable across
+different loss families and `margin` values. Use `--tune-monitor val/loss --tune-monitor-mode min`
+if you want Optuna to rank trials by raw validation loss instead.
+
 Monitor training with TensorBoard:
 
 ```bash
